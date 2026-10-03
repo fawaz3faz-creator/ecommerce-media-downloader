@@ -1,20 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { chromium } from 'playwright';
 
+export const dynamic = 'force-dynamic';
+
 const PRODUCT_DOMAINS = ['aliexpress.com', 'temu.com', 'shein.com', 'alibaba.com'];
 
-export type MediaCategory = 'main' | 'variants' | 'description' | 'videos';
+type MediaCategory = 'main' | 'variants' | 'description' | 'videos';
 
-export type MediaItem = {
+type MediaItem = {
   id: string;
   category: MediaCategory;
   type: 'image' | 'video';
   src: string;
   alt: string;
   label: string;
-  width?: number;
-  height?: number;
 };
+
+function normalizeUrl(raw: string) {
+  const value = raw.trim();
+  if (!/^https?:\/\//i.test(value)) return `https://${value}`;
+  return value;
+}
 
 function detectPlatform(url: string) {
   const hostname = new URL(url).hostname.toLowerCase();
@@ -23,12 +29,6 @@ function detectPlatform(url: string) {
   if (hostname.includes('shein')) return 'Shein';
   if (hostname.includes('alibaba')) return 'Alibaba';
   return 'E-commerce';
-}
-
-function normalizeUrl(raw: string) {
-  const value = raw.trim();
-  if (!/^https?:\/\//i.test(value)) return `https://${value}`;
-  return value;
 }
 
 function uniqueByUrl(items: MediaItem[]) {
@@ -40,7 +40,7 @@ function uniqueByUrl(items: MediaItem[]) {
   });
 }
 
-function buildDemoAssets(url: string, platform: string): MediaItem[] {
+function buildDemoAssets(platform: string): MediaItem[] {
   const base = [
     'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=1200&q=80',
     'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1200&q=80',
@@ -53,11 +53,11 @@ function buildDemoAssets(url: string, platform: string): MediaItem[] {
   const categories: MediaCategory[] = ['main', 'variants', 'description', 'videos'];
   const items: MediaItem[] = [];
 
-  categories.forEach((category, index) => {
+  categories.forEach((category) => {
     base.forEach((src, imageIndex) => {
       const isVideo = category === 'videos';
       items.push({
-        id: `${category}-${index}-${imageIndex}`,
+        id: `${category}-${imageIndex}`,
         category,
         type: isVideo ? 'video' : 'image',
         src: isVideo
@@ -83,26 +83,22 @@ async function extractPageData(url: string): Promise<{ title: string; items: Med
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
     const data = await page.evaluate(() => {
-      const anchors = Array.from(document.querySelectorAll('a'));
       const images = Array.from(document.querySelectorAll('img'));
       const videos = Array.from(document.querySelectorAll('video source, video'));
 
-      const collectImageUrls = (nodes: Element[]) =>
-        nodes
-          .map((node) => {
-            const src = (node as HTMLImageElement).src || (node as HTMLImageElement).getAttribute('data-src');
-            const srcset = (node as HTMLImageElement).getAttribute('srcset');
-            const candidate = src || srcset?.split(',')[0]?.trim().split(' ')[0];
-            return candidate || null;
-          })
-          .filter(Boolean) as string[];
+      const imageUrls = images
+        .map((node) => {
+          const element = node as HTMLImageElement;
+          const srcValue = element.src || element.getAttribute('data-src');
+          const srcset = element.getAttribute('srcset');
+          return srcValue || srcset?.split(',')[0]?.trim().split(' ')[0] || null;
+        })
+        .filter(Boolean) as string[];
 
-      const imageUrls = collectImageUrls(images);
       const videoUrls = videos
         .map((node) => {
-          const srcEl = node as HTMLSourceElement;
-          const src = srcEl.src || (node as HTMLVideoElement).src || srcEl.getAttribute('src');
-          return src || null;
+          const source = node as HTMLSourceElement;
+          return source.src || (node as HTMLVideoElement).src || source.getAttribute('src') || null;
         })
         .filter(Boolean) as string[];
 
@@ -114,59 +110,57 @@ async function extractPageData(url: string): Promise<{ title: string; items: Med
         title,
         imageUrls: Array.from(new Set([...(metaImage ? [metaImage] : []), ...imageUrls])),
         videoUrls: Array.from(new Set([...(metaVideo ? [metaVideo] : []), ...videoUrls])),
-        anchors: anchors.map((a) => a.href).filter(Boolean),
       };
     });
 
-    const allImages = data.imageUrls.length ? data.imageUrls : [
-      'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=1200&q=80',
-    ];
+    const allImages = data.imageUrls.length
+      ? data.imageUrls
+      : [
+          'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=1200&q=80',
+          'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1200&q=80',
+          'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=1200&q=80',
+        ];
 
-    const allVideos = data.videoUrls.length ? data.videoUrls : [
-      'https://videos.pexels.com/video-files/3209828/3209828-hd_1920_1080.mp4',
-    ];
+    const allVideos = data.videoUrls.length
+      ? data.videoUrls
+      : ['https://videos.pexels.com/video-files/3209828/3209828-hd_1920_1080.mp4'];
 
     const media: MediaItem[] = [];
 
-    const mainImages = allImages.slice(0, 6).map((src, index) => ({
-      id: `main-${index}`,
-      category: 'main' as const,
-      type: 'image' as const,
-      src,
-      alt: `${data.title} primary image ${index + 1}`,
-      label: `Main image ${index + 1}`,
-    }));
-
-    const variantImages = allImages.slice(6, 10).map((src, index) => ({
-      id: `variant-${index}`,
-      category: 'variants' as const,
-      type: 'image' as const,
-      src,
-      alt: `${data.title} variant image ${index + 1}`,
-      label: `Variant ${index + 1}`,
-    }));
-
-    const descriptionImages = allImages.slice(10, 14).map((src, index) => ({
-      id: `description-${index}`,
-      category: 'description' as const,
-      type: 'image' as const,
-      src,
-      alt: `${data.title} description image ${index + 1}`,
-      label: `Description ${index + 1}`,
-    }));
-
-    const videos = allVideos.slice(0, 3).map((src, index) => ({
-      id: `video-${index}`,
-      category: 'videos' as const,
-      type: 'video' as const,
-      src,
-      alt: `${data.title} video ${index + 1}`,
-      label: `Video ${index + 1}`,
-    }));
-
-    media.push(...mainImages, ...variantImages, ...descriptionImages, ...videos);
+    media.push(
+      ...allImages.slice(0, 6).map((src, index) => ({
+        id: `main-${index}`,
+        category: 'main' as const,
+        type: 'image' as const,
+        src,
+        alt: `${data.title} main image ${index + 1}`,
+        label: `Main ${index + 1}`,
+      })),
+      ...allImages.slice(6, 10).map((src, index) => ({
+        id: `variants-${index}`,
+        category: 'variants' as const,
+        type: 'image' as const,
+        src,
+        alt: `${data.title} variant ${index + 1}`,
+        label: `Variant ${index + 1}`,
+      })),
+      ...allImages.slice(10, 14).map((src, index) => ({
+        id: `description-${index}`,
+        category: 'description' as const,
+        type: 'image' as const,
+        src,
+        alt: `${data.title} description ${index + 1}`,
+        label: `Description ${index + 1}`,
+      })),
+      ...allVideos.slice(0, 3).map((src, index) => ({
+        id: `video-${index}`,
+        category: 'videos' as const,
+        type: 'video' as const,
+        src,
+        alt: `${data.title} video ${index + 1}`,
+        label: `Video ${index + 1}`,
+      })),
+    );
 
     return { title: data.title, items: uniqueByUrl(media) };
   } finally {
@@ -184,8 +178,8 @@ export async function GET(request: NextRequest) {
 
   try {
     const url = normalizeUrl(rawUrl);
-    const host = new URL(url).hostname.toLowerCase();
-    const supported = PRODUCT_DOMAINS.some((domain) => host.includes(domain));
+    const hostname = new URL(url).hostname.toLowerCase();
+    const supported = PRODUCT_DOMAINS.some((domain) => hostname.includes(domain));
 
     if (!supported) {
       return NextResponse.json(
@@ -202,7 +196,7 @@ export async function GET(request: NextRequest) {
     } catch {
       extracted = {
         title: `${platform} Product`,
-        items: buildDemoAssets(url, platform),
+        items: buildDemoAssets(platform),
       };
     }
 
@@ -212,7 +206,7 @@ export async function GET(request: NextRequest) {
       title: extracted.title,
       items: extracted.items,
     });
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: 'Unable to parse the provided URL.' }, { status: 400 });
   }
 }
